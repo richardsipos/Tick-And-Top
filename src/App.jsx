@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  Plus, Calendar as CalendarIcon, Tag, Mic, Sun, Moon,
-  CheckCircle2, Filter, Save, Upload, Trash2, Repeat, Bell,
-  ChevronDown, ChevronRight, Search, Users, Award
+  Plus, Calendar as CalendarIcon, Mic, CheckCircle2, Save, Upload,
+  Trash2, ChevronDown, ChevronRight, Search
 } from "lucide-react";
 import * as chrono from "chrono-node";
 import {
@@ -15,15 +14,17 @@ import {
 } from "recharts";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 
-// 🔗 Firestore persistence (new)
+// 🔗 Firestore persistence
 import {
-  listenTasks, addTask, updateTask, deleteTask, toggleComplete, USER_ID
+  listenUsers, createUser,
+  listenTasks, addTask, updateTask, deleteTask, toggleComplete, deleteUser
 } from "./persist";
 
 // --- Utilities ---------------------------------------------------------------
 const priorities = ["Low", "Medium", "High"];
 const defaultProjects = ["Inbox", "Work", "Personal", "School"];
 const areas = ["Personal", "Work"];
+
 function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
 
 function parseQuickInput(text) {
@@ -51,9 +52,7 @@ function parseQuickInput(text) {
 }
 
 function priBorder(p) {
-  return p === "High" ? "border-red-400"
-       : p === "Medium" ? "border-amber-400"
-       : "border-emerald-400";
+  return p === "High" ? "border-red-400" : p === "Medium" ? "border-amber-400" : "border-emerald-400";
 }
 
 function applyQuery(tasks, q) {
@@ -84,8 +83,7 @@ function applyQuery(tasks, q) {
     const op = parts[i].toUpperCase();
     const token = parts[i+1];
     const match = res.filter(t => evalPart(t, token));
-    if (op === "AND") current = current.filter(t => match.includes(t));
-    else current = Array.from(new Set([...current, ...match]));
+    current = op === "AND" ? current.filter(t => match.includes(t)) : Array.from(new Set([...current, ...match]));
   }
   return current;
 }
@@ -96,7 +94,7 @@ const initial = () => ({
   projects: defaultProjects,
   dark: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
   points: 0,
-  history: [], // {date: 'YYYY-MM-DD', completed: number}
+  history: [],
   collaborators: [],
 });
 
@@ -115,6 +113,41 @@ function reducer(state, action) {
 // --- Components --------------------------------------------------------------
 export default function ProTodoApp() {
   const [state, dispatch] = useReducer(reducer, undefined, initial);
+
+  // 🔶 user management
+  const [users, setUsers] = useState([]);
+  const [userId, setUserId] = useState(() => localStorage.getItem("todo_user_id") || "");
+
+  useEffect(() => {
+    const unsub = listenUsers(setUsers);
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (userId) localStorage.setItem("todo_user_id", userId);
+  }, [userId]);
+
+  // pick first/auto-create when list changes
+  useEffect(() => {
+    if (!users) return;
+    (async () => {
+      if (!users.length) {
+        const id = await createUser("Me");
+        setUserId(id);
+        return;
+      }
+      if (!userId) setUserId(users[0].id);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [users]);
+
+  // subscribe to tasks of selected user
+  useEffect(() => {
+    if (!userId) return;
+    const unsub = listenTasks(userId, (tasks) => dispatch({ type: "SET_TASKS", tasks }));
+    return unsub;
+  }, [userId]);
+
   const [query, setQuery] = useState("");
   const [quick, setQuick] = useState("");
   const [quickArea, setQuickArea] = useState("Personal");
@@ -122,16 +155,8 @@ export default function ProTodoApp() {
   const inputRef = useRef(null);
   const [editingId, setEditingId] = useState(null);
 
-  // Theme toggle (DOM class)
   useEffect(() => { document.documentElement.classList.toggle("dark", state.dark); }, [state.dark]);
 
-  // 🔴 Subscribe to Firestore (source of truth for tasks)
-  useEffect(() => {
-    const unsub = listenTasks(USER_ID, (tasks) => dispatch({ type: "SET_TASKS", tasks }));
-    return unsub;
-  }, []);
-
-  // keyboard shortcuts
   useEffect(() => {
     const onKey = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
@@ -151,11 +176,11 @@ export default function ProTodoApp() {
   const filtered = useMemo(() => applyQuery(state.tasks, query), [state.tasks, query]);
 
   async function addTaskFromQuick() {
-    if (!quick.trim()) return;
+    if (!quick.trim() || !userId) return;
     const meta = parseQuickInput(quick);
     let due = meta.due ? new Date(meta.due) : new Date(selectedDay);
     if (!meta.due) due.setHours(17, 0, 0, 0);
-    await addTask(USER_ID, {
+    await addTask(userId, {
       title: meta.title,
       tags: meta.tags,
       project: meta.project,
@@ -186,7 +211,7 @@ export default function ProTodoApp() {
 
   async function onDragEnd(result) {
     const { destination, draggableId } = result;
-    if (!destination) return;
+    if (!destination || !userId) return;
     const dayIndex = parseInt(destination.droppableId.replace("day-", ""), 10);
     const targetDate = weekDays[dayIndex];
     const task = state.tasks.find(t => t.id === draggableId);
@@ -194,7 +219,7 @@ export default function ProTodoApp() {
     const newDue = new Date(targetDate);
     const oldDue = task.due ? new Date(task.due) : null;
     if (oldDue) newDue.setHours(oldDue.getHours(), oldDue.getMinutes(), 0, 0);
-    await updateTask(USER_ID, task.id, { due: newDue });
+    await updateTask(userId, task.id, { due: newDue });
   }
 
   const todayStats = useMemo(() => {
@@ -208,6 +233,23 @@ export default function ProTodoApp() {
       <header className="sticky top-0 z-20 backdrop-blur bg-[#FBF9F3]/60 border-b border-[#E7E2D6]">
         <div className="max-w-6xl mx-auto p-3 flex items-center gap-2">
           <h1 className="text-2xl font-semibold">Today</h1>
+
+          <UserPicker
+            users={users}
+            value={userId}
+            onPick={(id) => setUserId(id)}
+            onCreate={async (name) => {
+              const id = await createUser(name);
+              setUserId(id);
+            }}
+            onDelete={async (id) => {
+              if (!confirm("Delete this user and all their tasks?")) return;
+              await deleteUser(id);
+              setUserId(""); // or switch to another available user
+            }}
+          />
+
+
           <div className="ml-auto flex items-center gap-2">
             <button
               onClick={() => dispatch({ type: "TOGGLE_DARK" })}
@@ -291,7 +333,7 @@ export default function ProTodoApp() {
               <div className="text-xl font-medium">To Do List</div>
               <button className="w-8 h-8 rounded-full bg-[#9AA27A] text-white flex items-center justify-center">+</button>
             </div>
-            <TaskList tasks={filtered} state={state} />
+            <TaskList tasks={filtered} userId={userId} />
           </div>
         </section>
 
@@ -348,7 +390,7 @@ export default function ProTodoApp() {
                                 className={`mb-2 p-2 rounded-lg text-sm ${t.completed ? "line-through opacity-60" : ""} border ${priBorder(t.priority)} bg-[#F7F3EA] dark:bg-[#20251D]`}
                               >
                                 {editingId === t.id ? (
-                                  <RescheduleInline task={t} onDone={() => setEditingId(null)} />
+                                  <RescheduleInline userId={userId} task={t} onDone={() => setEditingId(null)} />
                                 ) : (
                                   <div className="flex items-center justify-between gap-2">
                                     <div className="truncate pr-2">{t.title}</div>
@@ -383,11 +425,71 @@ export default function ProTodoApp() {
   );
 }
 
-function TaskList({ tasks, state }) {
+// put this helper above or inside UserPicker
+const colorFor = (s) => {
+  const sum = [...(s || "")].reduce((a, c) => a + c.charCodeAt(0), 0);
+  return `hsl(${sum % 360} 45% 40%)`; // consistent per-user color
+};
+
+function UserPicker({ users, value, onPick, onCreate, onDelete }) {
+  const [newName, setNewName] = React.useState("");
+
+  return (
+    <div className="ml-3 flex items-center gap-2">
+      <select
+        value={value || ""}
+        onChange={(e) => onPick(e.target.value)}
+        className="px-2 py-1 rounded-xl border border-[#E7E2D6] bg-transparent text-sm"
+        title="Pick user"
+      >
+        {!value && <option value="">Select user…</option>}
+        {users.map((u) => (
+          <option
+            key={u.id}
+            value={u.id}
+            style={{ color: colorFor(u.id) }} // ← colorized username
+          >
+            {u.name}
+          </option>
+        ))}
+      </select>
+
+      <input
+        value={newName}
+        onChange={(e) => setNewName(e.target.value)}
+        placeholder="New user…"
+        className="px-2 py-1 rounded-xl border border-[#E7E2D6] bg-transparent text-sm"
+      />
+      <button
+        onClick={() => {
+          const n = newName.trim();
+          if (!n) return;
+          onCreate(n);
+          setNewName("");
+        }}
+        className="px-2 py-1 rounded-xl border border-[#E7E2D6] hover:bg-[#F7F3EA] text-sm"
+      >
+        Create
+      </button>
+
+      {/* Delete current user */}
+      <button
+        disabled={!value}
+        onClick={() => value && onDelete?.(value)}
+        className="px-2 py-1 rounded-xl border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 text-sm"
+        title="Delete selected user"
+      >
+        Delete
+      </button>
+    </div>
+  );
+}
+
+
+function TaskList({ tasks, userId }) {
   const [openId, setOpenId] = useState(null);
   const groups = useMemo(() => {
-    const byProj = {};
-    for (const t of tasks) { const k = t.project || "Inbox"; (byProj[k] ||= []).push(t); }
+    const byProj = {}; for (const t of tasks) { const k = t.project || "Inbox"; (byProj[k] ||= []).push(t); }
     return byProj;
   }, [tasks]);
 
@@ -407,7 +509,7 @@ function TaskList({ tasks, state }) {
                     <input
                       type="checkbox"
                       checked={!!t.completed}
-                      onChange={() => toggleComplete(USER_ID, t)}
+                      onChange={() => toggleComplete(userId, t)}
                       className="w-4 h-4"
                     />
                     <div className={`flex-1 ${t.completed ? "line-through opacity-60" : ""}`}>
@@ -425,13 +527,13 @@ function TaskList({ tasks, state }) {
                       <ChevronDown className="w-4 h-4"/>
                     </button>
                     <button
-                      onClick={()=>deleteTask(USER_ID, t.id)}
+                      onClick={()=>deleteTask(userId, t.id)}
                       className="px-2 py-1 rounded-lg border border-red-300 text-red-600 hover:bg-red-50 dark:border-red-700 dark:hover:bg-red-900/20"
                     >
                       <Trash2 className="w-4 h-4"/>
                     </button>
                   </div>
-                  {openId === t.id && <TaskEditor task={t} />}
+                  {openId === t.id && <TaskEditor userId={userId} task={t} />}
                 </div>
               ))}
           </div>
@@ -441,7 +543,7 @@ function TaskList({ tasks, state }) {
   );
 }
 
-function TaskEditor({ task }) {
+function TaskEditor({ userId, task }) {
   const [form, setForm] = useState(() => ({
     title: task.title || "",
     notes: task.notes || "",
@@ -455,7 +557,7 @@ function TaskEditor({ task }) {
   }));
 
   async function save() {
-    await updateTask(USER_ID, task.id, {
+    await updateTask(userId, task.id, {
       title: form.title,
       notes: form.notes,
       project: form.project,
@@ -472,17 +574,17 @@ function TaskEditor({ task }) {
     const title = prompt("Subtask title");
     if (!title) return;
     const subtasks = [...(task.subtasks||[]), { id: uid(), title, done: false }];
-    await updateTask(USER_ID, task.id, { subtasks });
+    await updateTask(userId, task.id, { subtasks });
   }
 
   async function toggleSub(id) {
     const subtasks = (task.subtasks||[]).map(s => s.id===id?{...s, done:!s.done}:s);
-    await updateTask(USER_ID, task.id, { subtasks });
+    await updateTask(userId, task.id, { subtasks });
   }
 
   async function delSub(id) {
     const subtasks = (task.subtasks||[]).filter(s=>s.id!==id);
-    await updateTask(USER_ID, task.id, { subtasks });
+    await updateTask(userId, task.id, { subtasks });
   }
 
   function downloadICS() {
@@ -580,10 +682,10 @@ function TodayCompletion({ total, completed }) {
   );
 }
 
-function RescheduleInline({ task, onDone }) {
+function RescheduleInline({ userId, task, onDone }) {
   const [dt, setDt] = useState(task.due ? format(new Date(task.due), "yyyy-MM-dd'T'HH:mm") : "");
   async function save() {
-    await updateTask(USER_ID, task.id, { due: dt ? new Date(dt) : null });
+    await updateTask(userId, task.id, { due: dt ? new Date(dt) : null });
     onDone?.();
   }
   function snooze(mins) {
